@@ -1,5 +1,10 @@
 A system for controlling mult-colored LEDs in a fixture using the BeagleBone Black
-and the Go language. The useful bits in this directory are 
+and the Go language. 
+
+Here's the finished BeagleBone Black and cape in its case:
+![Ready to install](/images/bbb_finished.jpg)
+
+The useful bits in this directory are 
 
 The Go source code:
 
