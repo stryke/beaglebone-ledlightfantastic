@@ -1,5 +1,5 @@
 A system for controlling mult-colored LEDs in a fixture using the BeagleBone Black
-and the Go language. 
+and the Go language (Golang). 
 
 The useful bits in this directory are 
 
@@ -23,7 +23,7 @@ This project started out as negative space, created by the removal of a wall hea
 ![Project inspiration](/images/hole_formerly_known_as_heater.jpg)
 
 My idea was to build a shelf where the heater was and buy a light for the smaller
-space formerly occupied by the vent. My neighbor had bigger ideas...
+space formerly occupied by the vent. My neighbor thought I should do something a bit more challenging...
 ![Development](/images/bbb_development.jpg)
 
 Final breadboard before commiting to solder...
