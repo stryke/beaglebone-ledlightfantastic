@@ -34,3 +34,6 @@ After soldering up a cape...
 
 Here's the finished BeagleBone Black and cape in its case:
 ![Beagle Bone ready to install](/images/bbb_finished.jpg)
+
+The completed light fixture mounted in the wall. The LEDs face away from the viewer. The light reflects off a plywood sheet, painted white. The camera sees much more color variation than does the eye. Below the light is the top part of the shelf. On top of the shelf is a small wireless bridge for remote access to the BeagleBone and the larger power supply for the LEDs. To the left of the Nest thermostat are the four potentiometers: red, green, blue, white. To the right are a small button and a larger rocker switch. The button puts the BeagleBone to sleep and wakes it up; the switch cuts off power to the LEDs.
+![Installed](/images/in_place.jpg)
