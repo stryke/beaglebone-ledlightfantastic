@@ -1,6 +1,8 @@
 package main
 
 import (
+	"math/rand"
+
 	"github.com/btittelbach/go-bbhw"
 
 	"bytes"
@@ -48,6 +50,19 @@ const (
 	maxLEDCurrent   = 700  // enforced by resistors on light fixture
 	maxTotalCurrent = 1400 // previously determined to not overheat fixture
 	maxTotalDuty    = pwmPeriod * maxTotalCurrent / maxLEDCurrent
+	// auto mode
+	// autoLoop controls when the aout offset is changed
+	autoLoopMax    = 400 // we add min pad to get minpad to max+minpad
+	autoLoopMinPad = 100
+	autoLoopAdjust = 5 // frequency of change to auto loop max
+	// autoOffset controls by how much aout is adjusted
+	autoOffsetDelta = 2
+	autoOffsetMax   = 400 // outer bounds +/-
+)
+
+var (
+	// auto mode
+	autoMode bool // auto mode continuously varies light intensity
 )
 
 // translate command line options to ADC constants
@@ -69,12 +84,6 @@ var (
 	sampleAvg    = flag.Int("average", sampleAvgMin, "ADC sample averaging (default 1; possible values 1, 2, 4, 8, 16)")
 )
 
-func calcDuty(aout float64) time.Duration {
-	// theoretical max is 500000 but avoid hitting
-	// type Duration int64 as number of nanoseconds
-	return time.Duration(math.Min(.03*math.Pow(aout, 2)+ainMinPad, 499990))
-}
-
 // calcMedian add aout to existing values to calculate median
 func calcMedian(window *ring.Ring, aout int) float64 {
 	var counts = make([]float64, 0, *windowSize)
@@ -85,6 +94,24 @@ func calcMedian(window *ring.Ring, aout int) float64 {
 	window.Do(count)
 	sort.Float64s(counts)
 	return counts[*windowSize/2]
+}
+
+func calcDuty(aout float64) time.Duration {
+	// theoretical max is 500000 but avoid hitting
+	// type Duration int64 as number of nanoseconds
+	return time.Duration(math.Min(.03*math.Pow(aout, 2)+ainMinPad, 499990))
+}
+
+func normalize(duties *[]time.Duration, duty time.Duration) time.Duration {
+	var sum time.Duration
+	for _, d := range *duties {
+		sum += d
+	}
+	// only normalize if needed
+	if sum > maxTotalDuty {
+		return maxTotalDuty * duty / sum
+	}
+	return duty
 }
 
 // set duty based on median calculation
@@ -149,6 +176,31 @@ func newPWM(pwmPin string) *bbhw.PWMLine {
 type LED struct {
 	pwm *bbhw.PWMLine
 	win *ring.Ring
+	// auto mode
+	autoLoop        int // current loop number
+	autoLoopMax     int // number of loops between changes to aout offset
+	autoOffset      int // offset to aout in auto mode
+	autoOffsetDelta int // direction to change aout offset
+}
+
+// Incoming aout always reflects the current pot setting. What varies
+// over time is the autoOffset, which starts out at zero and always
+// remains within +/-autoOffsetMax.
+func (led *LED) autoAdjust() {
+	// increment/decrement the offset
+	led.autoLoop++
+	if led.autoLoop > led.autoLoopMax {
+		led.autoOffset += led.autoOffsetDelta
+		led.autoLoop = 0
+		// switch offset direction if led hit a boundary
+		if led.autoOffset >= autoOffsetMax || led.autoOffset <= -autoOffsetMax {
+			led.autoOffsetDelta = -led.autoOffsetDelta
+		}
+		// every so often change size of auto loop to change the change
+		if rand.Intn(autoLoopAdjust) == 0 {
+			led.autoLoopMax = randomAutoLoopMax()
+		}
+	}
 }
 
 func initPWMs() map[byte]*LED {
@@ -162,27 +214,47 @@ func initPWMs() map[byte]*LED {
 	// map ADC step channels to PWM pins
 	// adjusted LEDs to mirror RGBW on my potentiometer test board
 	LEDMap := map[byte]*LED{
-		0: &LED{pwm21, initWindow()},
-		1: &LED{pwm14, initWindow()},
-		2: &LED{pwm22, initWindow()},
-		3: &LED{pwm16, initWindow()},
+		0: &LED{
+			pwm:             pwm21,
+			win:             initWindow(),
+			autoLoopMax:     randomAutoLoopMax(),
+			autoOffsetDelta: randomAutoOffsetDelta(),
+		},
+		1: &LED{
+			pwm:             pwm14,
+			win:             initWindow(),
+			autoLoopMax:     randomAutoLoopMax(),
+			autoOffsetDelta: randomAutoOffsetDelta(),
+		},
+		2: &LED{
+			pwm:             pwm22,
+			win:             initWindow(),
+			autoLoopMax:     randomAutoLoopMax(),
+			autoOffsetDelta: randomAutoOffsetDelta(),
+		},
+		3: &LED{
+			pwm:             pwm16,
+			win:             initWindow(),
+			autoLoopMax:     randomAutoLoopMax(),
+			autoOffsetDelta: randomAutoOffsetDelta(),
+		},
 	}
 	return LEDMap
 }
 
-func normalize(duties *[]time.Duration, duty time.Duration) time.Duration {
-	var sum time.Duration
-	for _, d := range *duties {
-		sum += d
+func randomAutoLoopMax() int {
+	return rand.Intn(autoLoopMax) + autoLoopMinPad
+}
+
+func randomAutoOffsetDelta() int {
+	if rand.Intn(2) == 0 {
+		return autoOffsetDelta
 	}
-	// only normalize if needed
-	if sum > maxTotalDuty {
-		return maxTotalDuty * duty / sum
-	}
-	return duty
+	return -autoOffsetDelta
 }
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
 	var sleepDuration time.Duration
 	var err error
 	flag.Parse()
@@ -206,6 +278,7 @@ func main() {
 	// for debug logging
 	msgs := make([]string, 4) // 4 LED colors max
 
+	autoMode = true
 	for {
 		if sleepDuration > 0 {
 			time.Sleep(sleepDuration)
@@ -216,6 +289,13 @@ func main() {
 				msgs[step] = fmt.Sprintf("Step %d:  aout %4d", step, aout)
 			}
 			led = LEDMap[step]
+			if autoMode && aout > ainMinPad {
+				led.autoAdjust()
+				aout += led.autoOffset
+				if aout < 0 {
+					aout = 0
+				}
+			}
 			led.win = setDuty(led.pwm, led.win, aout, step, &duties, &msgs)
 		}
 		if *debug {

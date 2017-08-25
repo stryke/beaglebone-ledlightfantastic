@@ -146,7 +146,7 @@ func mmapInit() error {
 
 func ADCInit(clockDivider, sampleAvg byte) {
 	if err := mmapInit(); err != nil {
-		log.Fatalln("unable to initialize memory map: %s", err)
+		log.Fatalf("unable to initialize memory map: %s", err)
 	}
 
 	mr := mapped.register
