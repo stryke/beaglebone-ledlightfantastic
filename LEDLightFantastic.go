@@ -56,11 +56,11 @@ const (
 	aoutOn  = 4000
 	// autoLoop controls when the aout offset is changed
 	autoLoopMax    = 400 // we add min pad to get minpad to max+minpad
-	autoLoopMinPad = 100
-	autoLoopAdjust = 5 // frequency of change to auto loop max
+	autoLoopAdjust = 5   // frequency of change to auto loop max
 	// autoOffset controls by how much aout is adjusted
-	autoOffsetDelta = 2
-	autoOffsetMax   = 400 // outer bounds +/-
+	autoOffsetDelta  = 2
+	autoOffsetMax    = 400 // outer bounds +/-
+	autoOffsetAdjust = 5   // frequency of change to auto offset max
 )
 
 // translate command line options to ADC constants
@@ -177,24 +177,30 @@ type LED struct {
 	autoLoopMax     int // number of loops between changes to aout offset
 	autoOffset      int // offset to aout in auto mode
 	autoOffsetDelta int // direction to change aout offset
+	autoOffsetMax   int
 }
 
 // Incoming aout always reflects the current pot setting. What varies
 // over time is the autoOffset, which starts out at zero and always
 // remains within +/-autoOffsetMax.
-func (led *LED) autoAdjust() {
+func (led *LED) autoAdjust(loopMax int, updateLoopSize bool) {
 	// increment/decrement the offset
 	led.autoLoop++
 	if led.autoLoop > led.autoLoopMax {
 		led.autoOffset += led.autoOffsetDelta
 		led.autoLoop = 0
 		// switch offset direction if led hit a boundary
-		if led.autoOffset >= autoOffsetMax || led.autoOffset <= -autoOffsetMax {
+		if led.autoOffset >= led.autoOffsetMax || led.autoOffset <= -led.autoOffsetMax {
 			led.autoOffsetDelta = -led.autoOffsetDelta
+			// every so often change max size of offset
+			// esp. important for fast changing settings
+			if rand.Intn(autoOffsetAdjust) == 0 {
+				led.autoOffsetMax = randomAutoOffsetMax(autoOffsetMax)
+			}
 		}
 		// every so often change size of auto loop to change the change
-		if rand.Intn(autoLoopAdjust) == 0 {
-			led.autoLoopMax = randomAutoLoopMax()
+		if updateLoopSize || rand.Intn(autoLoopAdjust) == 0 {
+			led.autoLoopMax = randomAutoLoopMax(loopMax)
 		}
 	}
 }
@@ -213,33 +219,55 @@ func initPWMs() map[byte]*LED {
 		0: &LED{
 			pwm:             pwm21,
 			win:             initWindow(),
-			autoLoopMax:     randomAutoLoopMax(),
+			autoLoopMax:     randomAutoLoopMax(autoLoopMax),
 			autoOffsetDelta: randomAutoOffsetDelta(),
+			autoOffsetMax:   randomAutoOffsetMax(autoOffsetMax),
 		},
 		1: &LED{
 			pwm:             pwm14,
 			win:             initWindow(),
-			autoLoopMax:     randomAutoLoopMax(),
+			autoLoopMax:     randomAutoLoopMax(autoLoopMax),
 			autoOffsetDelta: randomAutoOffsetDelta(),
+			autoOffsetMax:   randomAutoOffsetMax(autoOffsetMax),
 		},
 		2: &LED{
 			pwm:             pwm22,
 			win:             initWindow(),
-			autoLoopMax:     randomAutoLoopMax(),
+			autoLoopMax:     randomAutoLoopMax(autoLoopMax),
 			autoOffsetDelta: randomAutoOffsetDelta(),
+			autoOffsetMax:   randomAutoOffsetMax(autoOffsetMax),
 		},
 		3: &LED{
 			pwm:             pwm16,
 			win:             initWindow(),
-			autoLoopMax:     randomAutoLoopMax(),
+			autoLoopMax:     randomAutoLoopMax(autoLoopMax),
 			autoOffsetDelta: randomAutoOffsetDelta(),
+			autoOffsetMax:   randomAutoOffsetMax(autoOffsetMax),
 		},
 	}
 	return LEDMap
 }
 
-func randomAutoLoopMax() int {
-	return rand.Intn(autoLoopMax) + autoLoopMinPad
+func randomAutoOffsetMax(offsetMax int) int {
+	// avoid panic
+	if offsetMax < 1 {
+		offsetMax = 1
+	}
+	// larger number means more variability
+	const offsetRangeRatio int = 4
+	offsetMinPad := offsetMax / offsetRangeRatio
+	return rand.Intn(offsetMax-offsetMinPad) + offsetMinPad
+}
+
+func randomAutoLoopMax(loopMax int) int {
+	// avoid panic
+	if loopMax < 1 {
+		loopMax = 1
+	}
+	// larger number means more variability
+	const loopRangeRatio int = 4
+	loopMinPad := loopMax / loopRangeRatio
+	return rand.Intn(loopMax-loopMinPad) + loopMinPad
 }
 
 func randomAutoOffsetDelta() int {
@@ -249,25 +277,56 @@ func randomAutoOffsetDelta() int {
 	return -autoOffsetDelta
 }
 
-// calcAutoMode returns true if one pot is off and three are on,
-// false if all pots are off, and the input value otherwise.
-func calcAutoMode(autoMode bool, aoutMap map[byte]int) bool {
+// translate pot aout to auto loop max size
+func calcStepLoopMax(aout float64) int {
+	switch {
+	case aout < 20:
+		return 1024 // lowest speed
+	case aout < 60:
+		return 512
+	case aout < 130:
+		return 256
+	case aout < 200:
+		return 128
+	case aout < 400:
+		return 64
+	case aout < 800:
+		return 32
+	case aout < 1200:
+		return 16
+	case aout < 2000:
+		return 8
+	case aout < 3500:
+		return 4
+	case aout < 4090:
+		return 2
+	}
+	return 1 // highest speed
+}
+
+// calcAutoMode sets autoMode to true if one pot is off and three are on,
+// false if all pots are off, and returns the input value otherwise.
+// Also calculated and returned is the step number that was set to off.
+// The off step is used to set the maximum loop speed.
+func calcAutoMode(autoMode bool, autoLoopStep byte, aoutMap map[byte]int) (bool, byte) {
 	var offCt, onCt uint8
-	for _, aout := range aoutMap {
+	var ls byte
+	for step, aout := range aoutMap {
 		switch {
 		case aout < aoutOff:
 			offCt += 1
+			ls = step // iff auto mode switches on
 		case aout > aoutOn:
 			onCt += 1
 		}
 	}
 	if offCt == 4 {
-		return false // set auto mode off
+		return false, autoLoopStep // set auto mode off
 	}
 	if offCt == 1 && onCt == 3 {
-		return true // set auto mode on
+		return true, ls // set auto mode on
 	}
-	return autoMode // leaves as is
+	return autoMode, autoLoopStep // leaves as is
 }
 
 func main() {
@@ -296,29 +355,42 @@ func main() {
 	msgs := make([]string, 4) // 4 LED colors max
 
 	var aoutMap map[byte]int
-	var medAout float64 // median value of aout
-	var autoMode bool   // auto mode continuously varies light intensity
+	var medAout float64                 // median value of aout
+	var autoMode bool                   // auto mode continuously varies light intensity
+	var autoLoopStep, prevLoopStep byte // pot that affects loop size, i.e., variation speed
+	var stepLoopMax int                 // maximum loop size setting
+	var updateLoopSize bool             // triggers immediate recalc of loop size
 	for {
 		if sleepDuration > 0 {
 			time.Sleep(sleepDuration)
 		}
 
 		aoutMap = ReadAnalog(P9_37, P9_38, P9_39, P9_40)
-		autoMode = calcAutoMode(autoMode, aoutMap)
+		autoMode, autoLoopStep = calcAutoMode(autoMode, autoLoopStep, aoutMap)
 		for step, aout := range aoutMap {
 			led = LEDMap[step]
 			medAout = calcMedian(led.win, aout)
 			led.win = led.win.Next()
 
+			if autoMode && step == autoLoopStep {
+				updateLoopSize = autoLoopStep != prevLoopStep
+				stepLoopMax = calcStepLoopMax(medAout)
+				prevLoopStep = autoLoopStep
+				if *debug {
+					msgs[step] = fmt.Sprintf("STEP %d:  aout %6.1f  loop max %4d", step, medAout, stepLoopMax)
+				}
+				continue
+			}
+
 			if autoMode && medAout > aoutOff {
-				led.autoAdjust()
+				led.autoAdjust(stepLoopMax, updateLoopSize)
 				medAout += float64(led.autoOffset)
 				if medAout < 0 {
 					medAout = 0
 				}
 			}
 			if *debug {
-				msgs[step] = fmt.Sprintf("STEP %d:   aout %4d   aout %6.1f", step, aout, medAout)
+				msgs[step] = fmt.Sprintf("STEP %d:  aout %4d   aout %6.1f", step, aout, medAout)
 			}
 			setDuty(led.pwm, medAout, step, &duties, &msgs)
 		}
