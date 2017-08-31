@@ -51,6 +51,9 @@ const (
 	maxTotalCurrent = 1400 // previously determined to not overheat fixture
 	maxTotalDuty    = pwmPeriod * maxTotalCurrent / maxLEDCurrent
 	// auto mode
+	// thresholds for OFF and ON
+	aoutOff = 10
+	aoutOn  = 4000
 	// autoLoop controls when the aout offset is changed
 	autoLoopMax    = 400 // we add min pad to get minpad to max+minpad
 	autoLoopMinPad = 100
@@ -58,11 +61,6 @@ const (
 	// autoOffset controls by how much aout is adjusted
 	autoOffsetDelta = 2
 	autoOffsetMax   = 400 // outer bounds +/-
-)
-
-var (
-	// auto mode
-	autoMode bool // auto mode continuously varies light intensity
 )
 
 // translate command line options to ADC constants
@@ -115,9 +113,8 @@ func normalize(duties *[]time.Duration, duty time.Duration) time.Duration {
 }
 
 // set duty based on median calculation
-func setDuty(pwm *bbhw.PWMLine, window *ring.Ring, aout int, step byte, duties *[]time.Duration, msgs *[]string) *ring.Ring {
-	newAout := calcMedian(window, aout)
-	newDuty := calcDuty(newAout)
+func setDuty(pwm *bbhw.PWMLine, aout float64, step byte, duties *[]time.Duration, msgs *[]string) {
+	newDuty := calcDuty(aout)
 	normalDuty := normalize(duties, newDuty)
 	// we save raw values for normalization calcs but set pwm to normalized duty cycle
 	if newDuty != (*duties)[step] {
@@ -125,9 +122,8 @@ func setDuty(pwm *bbhw.PWMLine, window *ring.Ring, aout int, step byte, duties *
 		pwm.SetPWM(pwmPeriod, normalDuty)
 	}
 	if *debug {
-		(*msgs)[step] = fmt.Sprintf("%s   aout %4d  duty %9s", (*msgs)[step], int(newAout), normalDuty)
+		(*msgs)[step] = fmt.Sprintf("%s   duty %9s", (*msgs)[step], normalDuty)
 	}
-	return window.Next()
 }
 
 func initWindow() *ring.Ring {
@@ -253,6 +249,27 @@ func randomAutoOffsetDelta() int {
 	return -autoOffsetDelta
 }
 
+// calcAutoMode returns true if one pot is off and three are on,
+// false if all pots are off, and the input value otherwise.
+func calcAutoMode(autoMode bool, aoutMap map[byte]int) bool {
+	var offCt, onCt uint8
+	for _, aout := range aoutMap {
+		switch {
+		case aout < aoutOff:
+			offCt += 1
+		case aout > aoutOn:
+			onCt += 1
+		}
+	}
+	if offCt == 4 {
+		return false // set auto mode off
+	}
+	if offCt == 1 && onCt == 3 {
+		return true // set auto mode on
+	}
+	return autoMode // leaves as is
+}
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	var sleepDuration time.Duration
@@ -278,28 +295,35 @@ func main() {
 	// for debug logging
 	msgs := make([]string, 4) // 4 LED colors max
 
-	autoMode = true
+	var aoutMap map[byte]int
+	var medAout float64 // median value of aout
+	var autoMode bool   // auto mode continuously varies light intensity
 	for {
 		if sleepDuration > 0 {
 			time.Sleep(sleepDuration)
 		}
 
-		for step, aout := range ReadAnalog(P9_37, P9_38, P9_39, P9_40) {
-			if *debug {
-				msgs[step] = fmt.Sprintf("Step %d:  aout %4d", step, aout)
-			}
+		aoutMap = ReadAnalog(P9_37, P9_38, P9_39, P9_40)
+		autoMode = calcAutoMode(autoMode, aoutMap)
+		for step, aout := range aoutMap {
 			led = LEDMap[step]
-			if autoMode && aout > ainMinPad {
+			medAout = calcMedian(led.win, aout)
+			led.win = led.win.Next()
+
+			if autoMode && medAout > aoutOff {
 				led.autoAdjust()
-				aout += led.autoOffset
-				if aout < 0 {
-					aout = 0
+				medAout += float64(led.autoOffset)
+				if medAout < 0 {
+					medAout = 0
 				}
 			}
-			led.win = setDuty(led.pwm, led.win, aout, step, &duties, &msgs)
+			if *debug {
+				msgs[step] = fmt.Sprintf("STEP %d:   aout %4d   aout %6.1f", step, aout, medAout)
+			}
+			setDuty(led.pwm, medAout, step, &duties, &msgs)
 		}
 		if *debug {
-			fmt.Println(strings.Join(msgs, "   "))
+			fmt.Println(strings.Join(msgs, "     "))
 		}
 	}
 }
