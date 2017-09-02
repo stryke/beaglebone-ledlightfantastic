@@ -183,14 +183,16 @@ type LED struct {
 // Incoming aout always reflects the current pot setting. What varies
 // over time is the autoOffset, which starts out at zero and always
 // remains within +/-autoOffsetMax.
-func (led *LED) autoAdjust(loopMax int, updateLoopSize bool) {
+func (led *LED) autoAdjust(aout int, loopMax int, updateLoopSize bool) {
 	// increment/decrement the offset
 	led.autoLoop++
 	if led.autoLoop > led.autoLoopMax {
 		led.autoOffset += led.autoOffsetDelta
 		led.autoLoop = 0
-		// switch offset direction if led hit a boundary
-		if led.autoOffset >= led.autoOffsetMax || led.autoOffset <= -led.autoOffsetMax {
+		// Switch offset direction if led hit a boundary.  Boundaries includes
+		// zero and the maximum possible level.  The two fixed boundaries
+		// prevent an LED from parking at one intensity.
+		if led.autoOffset >= led.autoOffsetMax || led.autoOffset <= -led.autoOffsetMax || (aout+led.autoOffset) <= aoutOff || (aout+led.autoOffset) >= aoutOn {
 			led.autoOffsetDelta = -led.autoOffsetDelta
 			// every so often change max size of offset
 			// esp. important for fast changing settings
@@ -383,7 +385,7 @@ func main() {
 			}
 
 			if autoMode && medAout > aoutOff {
-				led.autoAdjust(stepLoopMax, updateLoopSize)
+				led.autoAdjust(int(medAout), stepLoopMax, updateLoopSize)
 				medAout += float64(led.autoOffset)
 				if medAout < 0 {
 					medAout = 0
