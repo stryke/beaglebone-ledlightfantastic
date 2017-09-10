@@ -1,3 +1,10 @@
+/*
+Software controller for a 4-color LED light fixture run by a BeagleBone Black
+open-hardware computer.
+
+Version 2.0 2017-09-08
+*/
+
 package main
 
 import (
@@ -50,17 +57,21 @@ const (
 	maxLEDCurrent   = 700  // enforced by resistors on light fixture
 	maxTotalCurrent = 1400 // previously determined to not overheat fixture
 	maxTotalDuty    = pwmPeriod * maxTotalCurrent / maxLEDCurrent
-	// auto mode
+
+	//
+	// AUTO MODE
+	//
 	// thresholds for OFF and ON
 	aoutOff = 10
 	aoutOn  = 4000
 	// autoLoop controls when the aout offset is changed
-	autoLoopMax    = 400 // we add min pad to get minpad to max+minpad
-	autoLoopAdjust = 5   // frequency of change to auto loop max
+	autoLoopMax    = 400             // we add min pad to get minpad to max+minpad
+	autoLoopAdjust = 5 * time.Second // frequency of change to auto loop max
 	// autoOffset controls by how much aout is adjusted
-	autoOffsetDelta  = 2
-	autoOffsetMax    = 400 // outer bounds +/-
-	autoOffsetAdjust = 5   // frequency of change to auto offset max
+	autoOffsetDelta    = 2
+	autoOffsetMax      = 500             // outer bounds +/-
+	autoOffsetAdjust   = 5 * time.Second // frequency of change to auto offset max
+	autoOffsetMaxRatio = 2               // max ratio of autoOffsetMax to current aout setting
 )
 
 // translate command line options to ADC constants
@@ -173,38 +184,104 @@ type LED struct {
 	pwm *bbhw.PWMLine
 	win *ring.Ring
 	// auto mode
-	autoLoop        int // current loop number
-	autoLoopMax     int // number of loops between changes to aout offset
-	autoOffset      int // offset to aout in auto mode
-	autoOffsetDelta int // direction to change aout offset
-	autoOffsetMax   int
+	autoLoop         int       // current loop number
+	autoLoopMax      int       // number of loops between changes to aout offset
+	updateLoopSize   bool      // flag indicating speed pot was changed
+	lastLoopAdjust   time.Time // most recent attempt to adjust loop size
+	autoOffset       int       // offset to aout in auto mode
+	autoOffsetDelta  int       // direction to change aout offset
+	autoOffsetMax    int       // outer bounds +/-
+	lastOffsetAdjust time.Time // most recent attempt to adjust offset size
 }
 
 // Incoming aout always reflects the current pot setting. What varies
 // over time is the autoOffset, which starts out at zero and always
 // remains within +/-autoOffsetMax.
-func (led *LED) autoAdjust(aout int, loopMax int, updateLoopSize bool) {
-	// increment/decrement the offset
+func (led *LED) autoAdjust(aout int, loopMax int) {
 	led.autoLoop++
 	if led.autoLoop > led.autoLoopMax {
-		led.autoOffset += led.autoOffsetDelta
 		led.autoLoop = 0
-		// Switch offset direction if led hit a boundary.  Boundaries includes
-		// zero and the maximum possible level.  The two fixed boundaries
-		// prevent an LED from parking at one intensity.
-		if led.autoOffset >= led.autoOffsetMax || led.autoOffset <= -led.autoOffsetMax || (aout+led.autoOffset) <= aoutOff || (aout+led.autoOffset) >= aoutOn {
+		led.autoOffset += led.autoOffsetDelta
+
+		// Switch offset direction if led hit a boundary in the natural
+		// direction. (Unnatural direction is from outside the boundary, as can
+		// happen when the boundary is reset.) Boundaries includes zero and the
+		// maximum possible level.  The two fixed boundaries prevent an LED
+		// from parking at either extreme.
+		if (led.autoOffset > led.autoOffsetMax && led.autoOffsetDelta > 0) || (led.autoOffset < -led.autoOffsetMax && led.autoOffsetDelta < 0) || (aout+led.autoOffset) <= aoutOff || (aout+led.autoOffset) >= aoutOn {
 			led.autoOffsetDelta = -led.autoOffsetDelta
-			// every so often change max size of offset
+			// Every so often change max size of offset for variety
 			// esp. important for fast changing settings
-			if rand.Intn(autoOffsetAdjust) == 0 {
-				led.autoOffsetMax = randomAutoOffsetMax(autoOffsetMax)
+			if time.Since(led.lastOffsetAdjust) > autoOffsetAdjust {
+				led.lastOffsetAdjust = time.Now()
+				if rand.Intn(3) == 0 { // so LEDs do not follow in lockstep
+					// We limit intensity range at lower intensity settings.
+					offsetMax := aout * autoOffsetMaxRatio
+					if offsetMax > autoOffsetMax {
+						offsetMax = autoOffsetMax
+					}
+					led.autoOffsetMax = randomAutoOffsetMax(offsetMax)
+					// Is possible that current offset is well outside new boundary
+					// Set direction so led moves to get back inside boundaries
+					if led.autoOffset > led.autoOffsetMax {
+						led.autoOffsetDelta = -autoOffsetDelta
+					} else if led.autoOffset < -led.autoOffsetMax {
+						led.autoOffsetDelta = autoOffsetDelta
+					}
+				}
 			}
 		}
+
 		// every so often change size of auto loop to change the change
-		if updateLoopSize || rand.Intn(autoLoopAdjust) == 0 {
-			led.autoLoopMax = randomAutoLoopMax(loopMax)
+		// this has no effect when changing at maximum rate
+		if !led.updateLoopSize && time.Since(led.lastLoopAdjust) > autoLoopAdjust {
+			led.lastLoopAdjust = time.Now()
+			if rand.Intn(3) == 0 { // so LEDs do not follow in lockstep
+				led.autoLoopMax = randomAutoLoopMax(loopMax)
+			}
 		}
 	}
+
+	// Respond immediately when loop controlling pot is adjusted.
+	if led.updateLoopSize {
+		led.autoLoopMax = randomAutoLoopMax(loopMax)
+		led.updateLoopSize = false
+	}
+}
+
+func randomAutoOffsetMax(offsetMax int) int {
+	if offsetMax < 1 {
+		offsetMax = 1
+	}
+	// Small range ratio pushes limits of variability nearer to offsetMax.
+	// Larger values lowers limits of variability, i.e., increases possible
+	// variability.
+	const offsetRangeRatio int = 2
+	offsetMinPad := offsetMax / offsetRangeRatio
+	return rand.Intn(offsetMax-offsetMinPad) + offsetMinPad
+}
+
+func randomAutoLoopMax(loopMax int) int {
+	if loopMax < 1 {
+		loopMax = 1
+	}
+	// Small range ratio pushes limits of variability nearer to loopMax.
+	// Larger values lowers limits of variability, i.e., increases possible
+	// variability.
+	const loopRangeRatio int = 4
+	loopMinPad := loopMax / loopRangeRatio
+	r := rand.Intn(loopMax-loopMinPad) + loopMinPad
+	if r == 0 {
+		return 1
+	}
+	return r
+}
+
+func randomAutoOffsetDelta() int {
+	if rand.Intn(2) == 0 {
+		return autoOffsetDelta
+	}
+	return -autoOffsetDelta
 }
 
 func initPWMs() map[byte]*LED {
@@ -248,35 +325,6 @@ func initPWMs() map[byte]*LED {
 		},
 	}
 	return LEDMap
-}
-
-func randomAutoOffsetMax(offsetMax int) int {
-	// avoid panic
-	if offsetMax < 1 {
-		offsetMax = 1
-	}
-	// larger number means more variability
-	const offsetRangeRatio int = 4
-	offsetMinPad := offsetMax / offsetRangeRatio
-	return rand.Intn(offsetMax-offsetMinPad) + offsetMinPad
-}
-
-func randomAutoLoopMax(loopMax int) int {
-	// avoid panic
-	if loopMax < 1 {
-		loopMax = 1
-	}
-	// larger number means more variability
-	const loopRangeRatio int = 4
-	loopMinPad := loopMax / loopRangeRatio
-	return rand.Intn(loopMax-loopMinPad) + loopMinPad
-}
-
-func randomAutoOffsetDelta() int {
-	if rand.Intn(2) == 0 {
-		return autoOffsetDelta
-	}
-	return -autoOffsetDelta
 }
 
 // translate pot aout to auto loop max size
@@ -358,10 +406,10 @@ func main() {
 
 	var aoutMap map[byte]int
 	var medAout float64                 // median value of aout
+	var autoAout float64                // aout after auto mode offset
 	var autoMode bool                   // auto mode continuously varies light intensity
 	var autoLoopStep, prevLoopStep byte // pot that affects loop size, i.e., variation speed
 	var stepLoopMax int                 // maximum loop size setting
-	var updateLoopSize bool             // triggers immediate recalc of loop size
 	for {
 		if sleepDuration > 0 {
 			time.Sleep(sleepDuration)
@@ -374,27 +422,44 @@ func main() {
 			medAout = calcMedian(led.win, aout)
 			led.win = led.win.Next()
 
-			if autoMode && step == autoLoopStep {
-				updateLoopSize = autoLoopStep != prevLoopStep
-				stepLoopMax = calcStepLoopMax(medAout)
-				prevLoopStep = autoLoopStep
-				if *debug {
-					msgs[step] = fmt.Sprintf("STEP %d:  aout %6.1f  loop max %4d", step, medAout, stepLoopMax)
+			if autoMode {
+				// One LED is off and its pot used to control overall rate of
+				// color intensity change
+				if step == autoLoopStep {
+					if autoLoopStep != prevLoopStep {
+						for _, led := range LEDMap {
+							led.updateLoopSize = true
+						}
+						prevLoopStep = autoLoopStep
+					}
+					stepLoopMax = calcStepLoopMax(medAout)
+					if *debug {
+						msgs[step] = fmt.Sprintf("STEP %d:  median aout %6.1f  loop max %4d", step, medAout, stepLoopMax)
+					}
+					continue
 				}
-				continue
-			}
 
-			if autoMode && medAout > aoutOff {
-				led.autoAdjust(int(medAout), stepLoopMax, updateLoopSize)
-				medAout += float64(led.autoOffset)
-				if medAout < 0 {
-					medAout = 0
+				// Color intensity of other three LEDs is ranging up and down
+				if medAout > aoutOff {
+					led.autoAdjust(int(medAout), stepLoopMax)
+					autoAout = medAout + float64(led.autoOffset)
+					// avoid getting stuck in negative values
+					if autoAout < 0 {
+						autoAout = 0
+					}
+				} else {
+					autoAout = 0
 				}
+				if *debug {
+					msgs[step] = fmt.Sprintf("STEP %d:  loop max %4d   median aout %6.1f   auto aout %6.1f", step, led.autoLoopMax, medAout, autoAout)
+				}
+				setDuty(led.pwm, autoAout, step, &duties, &msgs)
+			} else {
+				if *debug {
+					msgs[step] = fmt.Sprintf("STEP %d:  aout %4d   median aout %6.1f", step, aout, medAout)
+				}
+				setDuty(led.pwm, medAout, step, &duties, &msgs)
 			}
-			if *debug {
-				msgs[step] = fmt.Sprintf("STEP %d:  aout %4d   aout %6.1f", step, aout, medAout)
-			}
-			setDuty(led.pwm, medAout, step, &duties, &msgs)
 		}
 		if *debug {
 			fmt.Println(strings.Join(msgs, "     "))
