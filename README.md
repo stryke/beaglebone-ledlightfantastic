@@ -1,6 +1,8 @@
 A collection of hardware and software for controlling 4-color LEDs using the BeagleBone Black open-hardware computer and the Go open source programming language (Golang). 
 
-This project started as negative space, created when I removed the wall heater. My idea was to build a shelf where the heater stood and buy a light for the smaller space formerly occupied by the vent. My neighbor, an engineer, had begun a project for his employer centered around a BeagleBone Black computer. He thought I should build my own light fixture and controller. 
+This project started as negative space, created when I removed the wall heater. My idea was to build a shelf where the heater stood and buy a light for the smaller space formerly occupied by the vent. My neighbor, an engineer, had begun a project for his employer centered around a BeagleBone Black computer. He thought I should build my own light fixture and controller.  
+
+That was version 1.0. Twirl a dial to adjust a color. Version 1.1 added an auto mode, entered by putting one dial to zero and the other three to full intensity. The off dial becomes a throttle of sorts, selecting one of 10 overall rates of change. Each of the three still control their respective color intensities. But now these are only baselines, around which each color varies. Auto mode also injects a bit of randomness into both the ranges of color intensity and the rates of change to those intensities.
 
 The useful bits in this directory are 
 

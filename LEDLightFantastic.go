@@ -2,7 +2,8 @@
 Software controller for a 4-color LED light fixture run by a BeagleBone Black
 open-hardware computer.
 
-Version 2.0 2017-09-08
+Version 1.0 2015-05-17
+Version 1.1 2017-09-10
 */
 
 package main
@@ -199,7 +200,14 @@ type LED struct {
 // remains within +/-autoOffsetMax.
 func (led *LED) autoAdjust(aout int, loopMax int) {
 	led.autoLoop++
-	if led.autoLoop > led.autoLoopMax {
+
+	// Respond immediately when loop controlling pot is adjusted.
+	if led.updateLoopSize || led.autoLoop > led.autoLoopMax {
+		if led.updateLoopSize {
+			led.autoLoopMax = randomAutoLoopMax(loopMax)
+			led.updateLoopSize = false
+		}
+
 		led.autoLoop = 0
 		led.autoOffset += led.autoOffsetDelta
 
@@ -214,7 +222,7 @@ func (led *LED) autoAdjust(aout int, loopMax int) {
 			// esp. important for fast changing settings
 			if time.Since(led.lastOffsetAdjust) > autoOffsetAdjust {
 				led.lastOffsetAdjust = time.Now()
-				if rand.Intn(3) == 0 { // so LEDs do not follow in lockstep
+				if rand.Intn(2) == 0 {
 					// We limit intensity range at lower intensity settings.
 					offsetMax := aout * autoOffsetMaxRatio
 					if offsetMax > autoOffsetMax {
@@ -242,33 +250,31 @@ func (led *LED) autoAdjust(aout int, loopMax int) {
 		}
 	}
 
-	// Respond immediately when loop controlling pot is adjusted.
-	if led.updateLoopSize {
-		led.autoLoopMax = randomAutoLoopMax(loopMax)
-		led.updateLoopSize = false
-	}
 }
 
+// Adds a degree of randomness to the maximum size of the offset applied to the
+// LED intensity value dialed by the user.
 func randomAutoOffsetMax(offsetMax int) int {
 	if offsetMax < 1 {
 		offsetMax = 1
 	}
 	// Small range ratio pushes limits of variability nearer to offsetMax.
-	// Larger values lowers limits of variability, i.e., increases possible
-	// variability.
+	// Larger value lowers lower limit of variability.
 	const offsetRangeRatio int = 2
 	offsetMinPad := offsetMax / offsetRangeRatio
 	return rand.Intn(offsetMax-offsetMinPad) + offsetMinPad
 }
 
+// Adds a degree of randomness to the size of the loops used to inc/dec the LED
+// intensities.
 func randomAutoLoopMax(loopMax int) int {
 	if loopMax < 1 {
 		loopMax = 1
 	}
 	// Small range ratio pushes limits of variability nearer to loopMax.
-	// Larger values lowers limits of variability, i.e., increases possible
-	// variability.
-	const loopRangeRatio int = 4
+	// Larger value lowers lower limit of variability.
+	// For loop speed if user says slow down, we try to comply.
+	const loopRangeRatio int = 2
 	loopMinPad := loopMax / loopRangeRatio
 	r := rand.Intn(loopMax-loopMinPad) + loopMinPad
 	if r == 0 {
@@ -277,6 +283,7 @@ func randomAutoLoopMax(loopMax int) int {
 	return r
 }
 
+// Randomize whether to increase or decrease color intensity.
 func randomAutoOffsetDelta() int {
 	if rand.Intn(2) == 0 {
 		return autoOffsetDelta
@@ -405,11 +412,11 @@ func main() {
 	msgs := make([]string, 4) // 4 LED colors max
 
 	var aoutMap map[byte]int
-	var medAout float64                 // median value of aout
-	var autoAout float64                // aout after auto mode offset
-	var autoMode bool                   // auto mode continuously varies light intensity
-	var autoLoopStep, prevLoopStep byte // pot that affects loop size, i.e., variation speed
-	var stepLoopMax int                 // maximum loop size setting
+	var medAout float64              // median value of aout
+	var autoAout float64             // aout after auto mode offset
+	var autoMode bool                // auto mode continuously varies light intensity
+	var autoLoopStep byte            // pot that affects loop size, i.e., variation speed
+	var stepLoopMax, prevLoopMax int // maximum loop size setting
 	for {
 		if sleepDuration > 0 {
 			time.Sleep(sleepDuration)
@@ -426,13 +433,14 @@ func main() {
 				// One LED is off and its pot used to control overall rate of
 				// color intensity change
 				if step == autoLoopStep {
-					if autoLoopStep != prevLoopStep {
+					stepLoopMax = calcStepLoopMax(medAout)
+					// If user changes loop, then LEDs need to recalculate theirs.
+					if stepLoopMax != prevLoopMax {
 						for _, led := range LEDMap {
 							led.updateLoopSize = true
 						}
-						prevLoopStep = autoLoopStep
+						prevLoopMax = stepLoopMax
 					}
-					stepLoopMax = calcStepLoopMax(medAout)
 					if *debug {
 						msgs[step] = fmt.Sprintf("STEP %d:  median aout %6.1f  loop max %4d", step, medAout, stepLoopMax)
 					}
